@@ -31,6 +31,7 @@ import io.grpc.MethodDescriptor;
 import io.grpc.Status;
 import io.grpc.StatusException;
 import io.grpc.StatusRuntimeException;
+import io.prometheus.client.Histogram;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -45,16 +46,23 @@ import java.util.logging.Logger;
 import javax.annotation.Nullable;
 
 /**
- * Utility functions for processing different call idioms. We have one-to-one correspondence
- * between utilities in this class and the potential signatures in a generated stub class so
- * that the runtime can vary behavior without requiring regeneration of the stub.
+ * Utility functions for processing different call idioms. We have one-to-one correspondence between
+ * utilities in this class and the potential signatures in a generated stub class so that the
+ * runtime can vary behavior without requiring regeneration of the stub.
  */
 public final class ClientCalls {
 
   private static final Logger logger = Logger.getLogger(ClientCalls.class.getName());
 
+  public static final Histogram asyncUnaryRequestCallLatency = Histogram.build()
+      .name("grpc_client_async_unary_request_call_latency_seconds")
+      .help("Histogram of time spent in asyncUnaryRequestCall")
+      .labelNames("phase")
+      .register();
+
   // Prevent instantiation
-  private ClientCalls() {}
+  private ClientCalls() {
+  }
 
   /**
    * Executes a unary call with a response {@link StreamObserver}.  The {@code call} should not be
@@ -83,8 +91,8 @@ public final class ClientCalls {
 
   /**
    * Executes a client-streaming call returning a {@link StreamObserver} for the request messages.
-   * The {@code call} should not be already started.  After calling this method, {@code call}
-   * should no longer be used.
+   * The {@code call} should not be already started.  After calling this method, {@code call} should
+   * no longer be used.
    *
    * <p>If the provided {@code responseObserver} is an instance of {@link ClientResponseObserver},
    * {@code beforeStart()} will be called.
@@ -98,8 +106,8 @@ public final class ClientCalls {
   }
 
   /**
-   * Executes a bidirectional-streaming call.  The {@code call} should not be already started.
-   * After calling this method, {@code call} should no longer be used.
+   * Executes a bidirectional-streaming call.  The {@code call} should not be already started. After
+   * calling this method, {@code call} should no longer be used.
    *
    * <p>If the provided {@code responseObserver} is an instance of {@link ClientResponseObserver},
    * {@code beforeStart()} will be called.
@@ -168,9 +176,9 @@ public final class ClientCalls {
   }
 
   /**
-   * Executes a server-streaming call returning a blocking {@link Iterator} over the
-   * response stream.  The {@code call} should not be already started.  After calling this method,
-   * {@code call} should no longer be used.
+   * Executes a server-streaming call returning a blocking {@link Iterator} over the response
+   * stream.  The {@code call} should not be already started.  After calling this method, {@code
+   * call} should no longer be used.
    *
    * <p>The returned iterator may throw {@link StatusRuntimeException} on error.
    *
@@ -185,9 +193,9 @@ public final class ClientCalls {
   }
 
   /**
-   * Executes a server-streaming call returning a blocking {@link Iterator} over the
-   * response stream.  The {@code call} should not be already started.  After calling this method,
-   * {@code call} should no longer be used.
+   * Executes a server-streaming call returning a blocking {@link Iterator} over the response
+   * stream.  The {@code call} should not be already started.  After calling this method, {@code
+   * call} should no longer be used.
    *
    * <p>The returned iterator may throw {@link StatusRuntimeException} on error.
    *
@@ -206,9 +214,9 @@ public final class ClientCalls {
   }
 
   /**
-   * Executes a unary call and returns a {@link ListenableFuture} to the response.  The
-   * {@code call} should not be already started.  After calling this method, {@code call} should no
-   * longer be used.
+   * Executes a unary call and returns a {@link ListenableFuture} to the response.  The {@code call}
+   * should not be already started.  After calling this method, {@code call} should no longer be
+   * used.
    *
    * @return a future for the single response message.
    */
@@ -225,10 +233,11 @@ public final class ClientCalls {
    *
    * <p>If interrupted, the interrupt is restored before throwing an exception..
    *
-   * @throws java.util.concurrent.CancellationException
-   *     if {@code get} throws a {@code CancellationException}.
-   * @throws io.grpc.StatusRuntimeException if {@code get} throws an {@link ExecutionException}
-   *     or an {@link InterruptedException}.
+   * @throws java.util.concurrent.CancellationException if {@code get} throws a {@code
+   *                                                    CancellationException}.
+   * @throws io.grpc.StatusRuntimeException             if {@code get} throws an {@link
+   *                                                    ExecutionException} or an {@link
+   *                                                    InterruptedException}.
    */
   private static <V> V getUnchecked(Future<V> future) {
     try {
@@ -303,10 +312,19 @@ public final class ClientCalls {
       ClientCall<ReqT, RespT> call,
       ReqT req,
       StartableListener<RespT> responseListener) {
+    Histogram.Timer startCallTimer = asyncUnaryRequestCallLatency.labels("start_call").startTimer();
     startCall(call, responseListener);
+    startCallTimer.observeDuration();
     try {
+      Histogram.Timer sendMessageTimer = asyncUnaryRequestCallLatency.labels("send_message")
+          .startTimer();
       call.sendMessage(req);
+      sendMessageTimer.observeDuration();
+
+      Histogram.Timer halfCloseTimer = asyncUnaryRequestCallLatency.labels("half_close")
+          .startTimer();
       call.halfClose();
+      halfCloseTimer.observeDuration();
     } catch (RuntimeException e) {
       throw cancelThrow(call, e);
     } catch (Error e) {
@@ -334,10 +352,12 @@ public final class ClientCalls {
   }
 
   private abstract static class StartableListener<T> extends ClientCall.Listener<T> {
+
     abstract void onStart();
   }
 
   private static final class CallToStreamObserverAdapter<T> extends ClientCallStreamObserver<T> {
+
     private boolean frozen;
     private final ClientCall<T, ?> call;
     private final boolean streamingResponse;
@@ -431,6 +451,7 @@ public final class ClientCalls {
 
   private static final class StreamObserverToCallListenerAdapter<ReqT, RespT>
       extends StartableListener<RespT> {
+
     private final StreamObserver<RespT> observer;
     private final CallToStreamObserverAdapter<ReqT> adapter;
     private boolean firstResponseReceived;
@@ -498,6 +519,7 @@ public final class ClientCalls {
    * Completes a {@link GrpcFuture} using {@link StreamObserver} events.
    */
   private static final class UnaryStreamToFuture<RespT> extends StartableListener<RespT> {
+
     private final GrpcFuture<RespT> responseFuture;
     private RespT value;
 
@@ -541,6 +563,7 @@ public final class ClientCalls {
   }
 
   private static final class GrpcFuture<RespT> extends AbstractFuture<RespT> {
+
     private final ClientCall<?, RespT> call;
 
     // Non private to avoid synthetic class
@@ -577,12 +600,15 @@ public final class ClientCalls {
    */
   // TODO(ejona86): determine how to allow ClientCall.cancel() in case of application error.
   private static final class BlockingResponseStream<T> implements Iterator<T> {
+
     // Due to flow control, only needs to hold up to 3 items: 2 for value, 1 for close.
     // (2 for value, not 1, because of early request() in next())
     private final BlockingQueue<Object> buffer = new ArrayBlockingQueue<>(3);
     private final StartableListener<T> listener = new QueuingListener();
     private final ClientCall<?, T> call;
-    /** May be null. */
+    /**
+     * May be null.
+     */
     private final ThreadlessExecutor threadless;
     // Only accessed when iterating.
     private Object last;
@@ -674,8 +700,10 @@ public final class ClientCalls {
     }
 
     private final class QueuingListener extends StartableListener<T> {
+
       // Non private to avoid synthetic class
-      QueuingListener() {}
+      QueuingListener() {
+      }
 
       private boolean done = false;
 
@@ -710,16 +738,18 @@ public final class ClientCalls {
   @SuppressWarnings("serial")
   private static final class ThreadlessExecutor extends ConcurrentLinkedQueue<Runnable>
       implements Executor {
+
     private static final Logger log = Logger.getLogger(ThreadlessExecutor.class.getName());
 
     private volatile Thread waiter;
 
     // Non private to avoid synthetic class
-    ThreadlessExecutor() {}
+    ThreadlessExecutor() {
+    }
 
     /**
-     * Waits until there is a Runnable, then executes it and all queued Runnables after it.
-     * Must only be called by one thread at a time.
+     * Waits until there is a Runnable, then executes it and all queued Runnables after it. Must
+     * only be called by one thread at a time.
      */
     public void waitAndDrain() throws InterruptedException {
       throwIfInterrupted();

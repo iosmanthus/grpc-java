@@ -9,6 +9,7 @@ plugins {
 description = "gRPC: Stub"
 dependencies {
     api project(':grpc-api')
+    implementation "io.prometheus:simpleclient:0.10.0"
     guavaDependency 'api'
     testImplementation libraries.truth,
             project(':grpc-testing')
