@@ -159,7 +159,7 @@ class WriteQueue {
    */
   private void flush() {
     Histogram.Timer flushTimer = writeQueueFlushDuration.startTimer();
-    List<Pair<String, Double>> batch = new ArrayList<>();
+    List<Record> batch = new ArrayList<>();
 
     PerfMark.startTask("WriteQueue.periodicFlush");
 
@@ -173,18 +173,19 @@ class WriteQueue {
         QueuedCommand cmd = item.getLeft();
         writeQueuePendingDuration.observe((System.nanoTime() - item.getRight()) / 1_000_000.0);
 
+        Record cmdRecord = new Record(cmd.toString());
         Histogram.Timer cmdTimer = writeQueueCmdRunDuration.labels(
             cmd.getClass().getSimpleName()
         ).startTimer();
-        long cmdStart = System.nanoTime();
-        cmd.run(channel);
-        cmdTimer.observeDuration();
-        batch.add(Pair.of(cmd.getClass().getName(), (System.nanoTime() - cmdStart) / 1_000_000.0));
 
+        // Run the command
+        cmd.run(channel);
+
+        cmdTimer.observeDuration();
+        cmdRecord.end();
+
+        batch.add(cmdRecord);
         if (++i == DEQUE_CHUNK_SIZE) {
-          if (logger.isDebugEnabled() && System.nanoTime() - start >= 50_000_000) {
-            logger.debug("Found slow batch. WriteQueue.flush: {}", batch);
-          }
           waitBatchTimer.observeDuration();
           waitBatchTimer = writeQueueWaitBatchDuration.startTimer();
           i = 0;
@@ -219,6 +220,9 @@ class WriteQueue {
     } finally {
       PerfMark.stopTask("WriteQueue.periodicFlush");
       flushTimer.observeDuration();
+      if (System.nanoTime() - start > 50_000_000) {
+        logger.warn("Found slow batch. WriteQueue.flush: " + batch);
+      }
       // Mark the write as done, if the queue is non-empty after marking trigger a new write.
       scheduled.set(false);
       if (!queue.isEmpty()) {
@@ -306,5 +310,33 @@ class WriteQueue {
     void run(Channel channel);
 
     Link getLink();
+  }
+
+  private static class Record {
+
+    long start;
+    long end;
+    long durationMS;
+    String name;
+
+    public Record(String name) {
+      this.name = name;
+      this.start = System.nanoTime();
+    }
+
+    public void end() {
+      this.end = System.nanoTime();
+      this.durationMS = (end - start) / 1_000_000;
+    }
+
+
+    public String toString() {
+      return "Record{" +
+          "start=" + start +
+          ", end=" + end +
+          ", durationMS=" + durationMS +
+          ", name='" + name + '\'' +
+          '}';
+    }
   }
 }
