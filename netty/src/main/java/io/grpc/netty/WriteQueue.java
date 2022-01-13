@@ -19,12 +19,16 @@ package io.grpc.netty;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import com.sun.org.slf4j.internal.Logger;
+import com.sun.org.slf4j.internal.LoggerFactory;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelPromise;
 import io.perfmark.Link;
 import io.perfmark.PerfMark;
 import io.prometheus.client.Histogram;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -52,6 +56,7 @@ class WriteQueue {
   private final Channel channel;
   private final Queue<Pair<QueuedCommand, Long>> queue;
   private final AtomicBoolean scheduled = new AtomicBoolean();
+  private final static Logger logger = LoggerFactory.getLogger(WriteQueue.class);
 
   public static final Histogram writeQueuePendingDuration = Histogram.build()
       .name("grpc_netty_write_queue_pending_duration_ms")
@@ -154,7 +159,11 @@ class WriteQueue {
    */
   private void flush() {
     Histogram.Timer flushTimer = writeQueueFlushDuration.startTimer();
+    List<Pair<String, Double>> batch = new ArrayList<>();
+
     PerfMark.startTask("WriteQueue.periodicFlush");
+
+    long start = System.nanoTime();
     try {
       Pair<QueuedCommand, Long> item;
       int i = 0;
@@ -167,10 +176,15 @@ class WriteQueue {
         Histogram.Timer cmdTimer = writeQueueCmdRunDuration.labels(
             cmd.getClass().getSimpleName()
         ).startTimer();
+        long cmdStart = System.nanoTime();
         cmd.run(channel);
         cmdTimer.observeDuration();
+        batch.add(Pair.of(cmd.getClass().getName(), (System.nanoTime() - cmdStart) / 1_000_000.0));
 
         if (++i == DEQUE_CHUNK_SIZE) {
+          if (logger.isDebugEnabled() && System.nanoTime() - start >= 50_000_000) {
+            logger.debug("Found slow batch. WriteQueue.flush: {}", batch);
+          }
           waitBatchTimer.observeDuration();
           waitBatchTimer = writeQueueWaitBatchDuration.startTimer();
           i = 0;
