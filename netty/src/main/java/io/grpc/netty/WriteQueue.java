@@ -220,7 +220,7 @@ class WriteQueue {
     } finally {
       PerfMark.stopTask("WriteQueue.periodicFlush");
       flushTimer.observeDuration();
-      if (System.nanoTime() - start > 50_000_000) {
+      if (System.nanoTime() - start > 30_000_000) {
         logger.warn("Found slow batch. WriteQueue.flush: " + batch);
       }
       // Mark the write as done, if the queue is non-empty after marking trigger a new write.
