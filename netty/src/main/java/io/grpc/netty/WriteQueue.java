@@ -71,6 +71,7 @@ class WriteQueue {
   public static final Histogram writeQueueCmdRunDuration = Histogram.build()
       .name("grpc_netty_write_queue_cmd_run_duration_seconds")
       .help("Duration of a task execution in the write queue.")
+      .labelNames("type")
       .register();
 
   public static final Histogram writeQueueChannelFlushDuration = Histogram.build()
@@ -163,7 +164,9 @@ class WriteQueue {
         QueuedCommand cmd = item.getLeft();
         writeQueuePendingDuration.observe((System.nanoTime() - item.getRight()) / 1_000_000.0);
 
-        Histogram.Timer cmdTimer = writeQueueCmdRunDuration.startTimer();
+        Histogram.Timer cmdTimer = writeQueueCmdRunDuration.labels(
+            cmd.getClass().getSimpleName()
+        ).startTimer();
         cmd.run(channel);
         cmdTimer.observeDuration();
 
