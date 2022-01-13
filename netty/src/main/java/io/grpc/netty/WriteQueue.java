@@ -19,8 +19,6 @@ package io.grpc.netty;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
-import com.sun.org.slf4j.internal.Logger;
-import com.sun.org.slf4j.internal.LoggerFactory;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelPromise;
@@ -32,6 +30,8 @@ import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.apache.commons.lang3.tuple.Pair;
 
 /**
@@ -56,7 +56,7 @@ class WriteQueue {
   private final Channel channel;
   private final Queue<Pair<QueuedCommand, Long>> queue;
   private final AtomicBoolean scheduled = new AtomicBoolean();
-  private final static Logger logger = LoggerFactory.getLogger(WriteQueue.class);
+  private static final Logger logger = Logger.getLogger(WriteQueue.class.getName());
 
   public static final Histogram writeQueuePendingDuration = Histogram.build()
       .name("grpc_netty_write_queue_pending_duration_ms")
@@ -221,7 +221,9 @@ class WriteQueue {
       PerfMark.stopTask("WriteQueue.periodicFlush");
       flushTimer.observeDuration();
       if (System.nanoTime() - start > 30_000_000) {
-        logger.warn("Found slow batch. WriteQueue.flush: " + batch);
+        String msg = "Found slow batch. WriteQueue.flush: " + batch;
+        logger.log(Level.WARNING, msg);
+        System.out.println(msg);
       }
       // Mark the write as done, if the queue is non-empty after marking trigger a new write.
       scheduled.set(false);
