@@ -24,9 +24,11 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelPromise;
 import io.perfmark.Link;
 import io.perfmark.PerfMark;
+import io.prometheus.client.Histogram;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.commons.lang3.tuple.Pair;
 
 /**
  * A queue of pending writes to a {@link Channel} that is flushed as a single unit.
@@ -48,8 +50,23 @@ class WriteQueue {
   };
 
   private final Channel channel;
-  private final Queue<QueuedCommand> queue;
+  private final Queue<Pair<QueuedCommand, Long>> queue;
   private final AtomicBoolean scheduled = new AtomicBoolean();
+
+  public static final Histogram writeQueuePendingDuration = Histogram.build()
+      .name("grpc_netty_write_queue_pending_duration_ms")
+      .help("Pending duration of a task in the write queue.")
+      .register();
+
+  public static final Histogram writeQueueWaitBatchDuration = Histogram.build()
+      .name("grpc_netty_write_queue_wait_batch_duration_seconds")
+      .help("Duration of waiting a batch filled in the write queue.")
+      .register();
+
+  public static final Histogram writeQueueFlushDuration = Histogram.build()
+      .name("grpc_netty_write_queue_flush_duration_seconds")
+      .help("Duration of a flush of the write queue.")
+      .register();
 
   public WriteQueue(Channel channel) {
     this.channel = Preconditions.checkNotNull(channel, "channel");
@@ -72,8 +89,8 @@ class WriteQueue {
    * Enqueue a write command on the channel.
    *
    * @param command a write to be executed on the channel.
-   * @param flush true if a flush of the write should be schedule, false if a later call to
-   *              enqueue will schedule the flush.
+   * @param flush   true if a flush of the write should be schedule, false if a later call to
+   *                enqueue will schedule the flush.
    */
   @CanIgnoreReturnValue
   ChannelFuture enqueue(QueuedCommand command, boolean flush) {
@@ -82,7 +99,7 @@ class WriteQueue {
 
     ChannelPromise promise = channel.newPromise();
     command.promise(promise);
-    queue.add(command);
+    queue.add(Pair.of(command, System.nanoTime()));
     if (flush) {
       scheduleFlush();
     }
@@ -95,7 +112,8 @@ class WriteQueue {
    * processed in-order with writes.
    */
   void enqueue(Runnable runnable, boolean flush) {
-    queue.add(new RunnableCommand(runnable));
+    Long now = System.nanoTime();
+    queue.add(Pair.<QueuedCommand, Long>of(new RunnableCommand(runnable), now));
     if (flush) {
       scheduleFlush();
     }
@@ -115,18 +133,24 @@ class WriteQueue {
   }
 
   /**
-   * Process the queue of commands and dispatch them to the stream. This method is only
-   * called in the event loop
+   * Process the queue of commands and dispatch them to the stream. This method is only called in
+   * the event loop
    */
   private void flush() {
+    Histogram.Timer flushTimer = writeQueueFlushDuration.startTimer();
     PerfMark.startTask("WriteQueue.periodicFlush");
     try {
-      QueuedCommand cmd;
+      Pair<QueuedCommand, Long> item;
       int i = 0;
       boolean flushedOnce = false;
-      while ((cmd = queue.poll()) != null) {
+      Histogram.Timer waitBatchTimer = writeQueueWaitBatchDuration.startTimer();
+      while ((item = queue.poll()) != null) {
+        QueuedCommand cmd = item.getLeft();
+        writeQueuePendingDuration.observe((System.nanoTime() - item.getRight()) / 1_000_000.0);
         cmd.run(channel);
         if (++i == DEQUE_CHUNK_SIZE) {
+          waitBatchTimer.observeDuration();
+          waitBatchTimer = writeQueueWaitBatchDuration.startTimer();
           i = 0;
           // Flush each chunk so we are releasing buffers periodically. In theory this loop
           // might never end as new events are continuously added to the queue, if we never
@@ -146,11 +170,13 @@ class WriteQueue {
         try {
           channel.flush();
         } finally {
+          waitBatchTimer.observeDuration();
           PerfMark.stopTask("WriteQueue.flush1");
         }
       }
     } finally {
       PerfMark.stopTask("WriteQueue.periodicFlush");
+      flushTimer.observeDuration();
       // Mark the write as done, if the queue is non-empty after marking trigger a new write.
       scheduled.set(false);
       if (!queue.isEmpty()) {
@@ -160,6 +186,7 @@ class WriteQueue {
   }
 
   private static class RunnableCommand implements QueuedCommand {
+
     private final Runnable runnable;
     private final Link link;
 
@@ -223,6 +250,7 @@ class WriteQueue {
    * Simple wrapper type around a command and its optional completion listener.
    */
   interface QueuedCommand {
+
     /**
      * Returns the promise beeing notified of the success/failure of the write.
      */

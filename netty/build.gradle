@@ -31,6 +31,8 @@ dependencies {
             libraries.conscrypt,
             libraries.netty_epoll
     signature "org.codehaus.mojo.signature:java17:1.0@signature"
+    implementation group: 'org.apache.commons', name: 'commons-lang3', version: '3.0'
+    implementation "io.prometheus:simpleclient:0.10.0"
     alpnagent libraries.jetty_alpn_agent
 }
 

@@ -54,8 +54,8 @@ public final class ClientCalls {
 
   private static final Logger logger = Logger.getLogger(ClientCalls.class.getName());
 
-  public static final Histogram asyncUnaryRequestCallLatency = Histogram.build()
-      .name("grpc_client_async_unary_request_call_latency_seconds")
+  public static final Histogram asyncUnaryRequestCallDuration = Histogram.build()
+      .name("grpc_client_async_unary_request_call_duration_seconds")
       .help("Histogram of time spent in asyncUnaryRequestCall")
       .labelNames("phase")
       .register();
@@ -312,16 +312,16 @@ public final class ClientCalls {
       ClientCall<ReqT, RespT> call,
       ReqT req,
       StartableListener<RespT> responseListener) {
-    Histogram.Timer startCallTimer = asyncUnaryRequestCallLatency.labels("start_call").startTimer();
+    Histogram.Timer startCallTimer = asyncUnaryRequestCallDuration.labels("start_call").startTimer();
     startCall(call, responseListener);
     startCallTimer.observeDuration();
     try {
-      Histogram.Timer sendMessageTimer = asyncUnaryRequestCallLatency.labels("send_message")
+      Histogram.Timer sendMessageTimer = asyncUnaryRequestCallDuration.labels("send_message")
           .startTimer();
       call.sendMessage(req);
       sendMessageTimer.observeDuration();
 
-      Histogram.Timer halfCloseTimer = asyncUnaryRequestCallLatency.labels("half_close")
+      Histogram.Timer halfCloseTimer = asyncUnaryRequestCallDuration.labels("half_close")
           .startTimer();
       call.halfClose();
       halfCloseTimer.observeDuration();
