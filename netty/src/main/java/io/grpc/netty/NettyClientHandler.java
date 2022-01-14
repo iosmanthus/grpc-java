@@ -79,6 +79,7 @@ import io.netty.handler.codec.http2.WeightedFairQueueByteDistributor;
 import io.netty.handler.logging.LogLevel;
 import io.perfmark.PerfMark;
 import io.perfmark.Tag;
+import io.prometheus.client.Histogram;
 import java.nio.channels.ClosedChannelException;
 import java.util.concurrent.Executor;
 import java.util.logging.Level;
@@ -90,6 +91,7 @@ import javax.annotation.Nullable;
  * the context of the Netty Channel thread.
  */
 class NettyClientHandler extends AbstractNettyHandler {
+
   private static final Logger logger = Logger.getLogger(NettyClientHandler.class.getName());
 
   /**
@@ -102,7 +104,7 @@ class NettyClientHandler extends AbstractNettyHandler {
    * Status used when the transport has exhausted the number of streams.
    */
   private static final Status EXHAUSTED_STREAMS_STATUS =
-          Status.UNAVAILABLE.withDescription("Stream IDs have been exhausted");
+      Status.UNAVAILABLE.withDescription("Stream IDs have been exhausted");
   private static final long USER_PING_PAYLOAD = 1111;
 
   private final Http2Connection.PropertyKey streamKey;
@@ -132,6 +134,24 @@ class NettyClientHandler extends AbstractNettyHandler {
   private InternalChannelz.Security securityInfo;
   private Status abruptGoAwayStatus;
   private Status channelInactiveReason;
+
+  public final static Histogram createStreamWriteHeaderDuration = Histogram.build()
+      .name("grpc_netty_client_stream_write_header_duration_seconds")
+      .labelNames("path")
+      .help("Time taken to write headers for a stream in seconds.")
+      .register();
+
+  public final static Histogram createStreamAddListenerDuration = Histogram.build()
+      .name("grpc_netty_client_stream_add_listener_duration_seconds")
+      .labelNames("path")
+      .help("Time taken to add listener for a stream future in seconds.")
+      .register();
+
+  public final static Histogram createStreamCreateNewFuture = Histogram.build()
+      .name("grpc_netty_client_stream_create_future_duration_seconds")
+      .labelNames("path")
+      .help("Time taken to create new stream future in seconds.")
+      .register();
 
   static NettyClientHandler newHandler(
       ClientTransportLifecycleManager lifecycleManager,
@@ -332,7 +352,7 @@ class NettyClientHandler extends AbstractNettyHandler {
    */
   @Override
   public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
-          throws Exception {
+      throws Exception {
     if (msg instanceof CreateStreamCommand) {
       createStream((CreateStreamCommand) msg, promise);
     } else if (msg instanceof SendGrpcFrameCommand) {
@@ -505,7 +525,7 @@ class NettyClientHandler extends AbstractNettyHandler {
   }
 
   @Override
-  protected void onConnectionError(ChannelHandlerContext ctx,  boolean outbound, Throwable cause,
+  protected void onConnectionError(ChannelHandlerContext ctx, boolean outbound, Throwable cause,
       Http2Exception http2Ex) {
     logger.log(Level.FINE, "Caught a connection error", cause);
     lifecycleManager.notifyShutdown(Utils.statusFromThrowable(cause));
@@ -540,7 +560,7 @@ class NettyClientHandler extends AbstractNettyHandler {
    * the creation request is queued.
    */
   private void createStream(CreateStreamCommand command, ChannelPromise promise)
-          throws Exception {
+      throws Exception {
     if (lifecycleManager.getShutdownThrowable() != null) {
       command.stream().setNonExistent();
       // The connection is going away (it is really the GOAWAY case),
@@ -563,7 +583,7 @@ class NettyClientHandler extends AbstractNettyHandler {
       // Initiate a graceful shutdown if we haven't already.
       if (!connection().goAwaySent()) {
         logger.fine("Stream IDs have been exhausted for this connection. "
-                + "Initiating graceful shutdown of the connection.");
+            + "Initiating graceful shutdown of the connection.");
         lifecycleManager.notifyShutdown(e.getStatus());
         close(ctx(), ctx().newPromise());
       }
@@ -616,51 +636,61 @@ class NettyClientHandler extends AbstractNettyHandler {
       final ChannelPromise promise) {
     // Create an intermediate promise so that we can intercept the failure reported back to the
     // application.
+    Histogram.Timer createFutureTimer = createStreamCreateNewFuture.labels(headers.path().toString()).startTimer();
     ChannelPromise tempPromise = ctx().newPromise();
-    encoder().writeHeaders(ctx(), streamId, headers, 0, isGet, tempPromise)
-        .addListener(new ChannelFutureListener() {
-          @Override
-          public void operationComplete(ChannelFuture future) throws Exception {
-            if (future.isSuccess()) {
-              // The http2Stream will be null in case a stream buffered in the encoder
-              // was canceled via RST_STREAM.
-              Http2Stream http2Stream = connection().stream(streamId);
-              if (http2Stream != null) {
-                stream.getStatsTraceContext().clientOutboundHeaders();
-                http2Stream.setProperty(streamKey, stream);
+    createFutureTimer.observeDuration();
 
-                // This delays the in-use state until the I/O completes, which technically may
-                // be later than we would like.
-                if (shouldBeCountedForInUse) {
-                  inUseState.updateObjectInUse(http2Stream, true);
-                }
+    Histogram.Timer writeHeaderTimer = createStreamWriteHeaderDuration.labels(
+        headers.path().toString()).startTimer();
+    ChannelFuture future = encoder().writeHeaders(ctx(), streamId, headers, 0, isGet, tempPromise);
+    writeHeaderTimer.observeDuration();
 
-                // Attach the client stream to the HTTP/2 stream object as user data.
-                stream.setHttp2Stream(http2Stream);
-              }
-              // Otherwise, the stream has been cancelled and Netty is sending a
-              // RST_STREAM frame which causes it to purge pending writes from the
-              // flow-controller and delete the http2Stream. The stream listener has already
-              // been notified of cancellation so there is nothing to do.
+    Histogram.Timer addListenerTimer = createStreamAddListenerDuration.labels(
+        headers.path().toString()).startTimer();
+    future.addListener(new ChannelFutureListener() {
+      @Override
+      public void operationComplete(ChannelFuture future) throws Exception {
+        if (future.isSuccess()) {
+          // The http2Stream will be null in case a stream buffered in the encoder
+          // was canceled via RST_STREAM.
+          Http2Stream http2Stream = connection().stream(streamId);
+          if (http2Stream != null) {
+            stream.getStatsTraceContext().clientOutboundHeaders();
+            http2Stream.setProperty(streamKey, stream);
 
-              // Just forward on the success status to the original promise.
-              promise.setSuccess();
-            } else {
-              final Throwable cause = future.cause();
-              if (cause instanceof StreamBufferingEncoder.Http2GoAwayException) {
-                StreamBufferingEncoder.Http2GoAwayException e =
-                    (StreamBufferingEncoder.Http2GoAwayException) cause;
-                Status status = statusFromH2Error(
-                    Status.Code.UNAVAILABLE, "GOAWAY closed buffered stream",
-                    e.errorCode(), e.debugData());
-                stream.transportReportStatus(status, RpcProgress.REFUSED, true, new Metadata());
-                promise.setFailure(status.asRuntimeException());
-              } else {
-                promise.setFailure(cause);
-              }
+            // This delays the in-use state until the I/O completes, which technically may
+            // be later than we would like.
+            if (shouldBeCountedForInUse) {
+              inUseState.updateObjectInUse(http2Stream, true);
             }
+
+            // Attach the client stream to the HTTP/2 stream object as user data.
+            stream.setHttp2Stream(http2Stream);
           }
-        });
+          // Otherwise, the stream has been cancelled and Netty is sending a
+          // RST_STREAM frame which causes it to purge pending writes from the
+          // flow-controller and delete the http2Stream. The stream listener has already
+          // been notified of cancellation so there is nothing to do.
+
+          // Just forward on the success status to the original promise.
+          promise.setSuccess();
+        } else {
+          final Throwable cause = future.cause();
+          if (cause instanceof StreamBufferingEncoder.Http2GoAwayException) {
+            StreamBufferingEncoder.Http2GoAwayException e =
+                (StreamBufferingEncoder.Http2GoAwayException) cause;
+            Status status = statusFromH2Error(
+                Status.Code.UNAVAILABLE, "GOAWAY closed buffered stream",
+                e.errorCode(), e.debugData());
+            stream.transportReportStatus(status, RpcProgress.REFUSED, true, new Metadata());
+            promise.setFailure(status.asRuntimeException());
+          } else {
+            promise.setFailure(cause);
+          }
+        }
+      }
+    });
+    addListenerTimer.observeDuration();
   }
 
   /**
@@ -805,8 +835,8 @@ class NettyClientHandler extends AbstractNettyHandler {
   }
 
   /**
-   * Handler for a GOAWAY being received. Fails any streams created after the
-   * last known stream. May only be called during a read.
+   * Handler for a GOAWAY being received. Fails any streams created after the last known stream. May
+   * only be called during a read.
    */
   private void goingAway(long errorCode, byte[] debugData) {
     Status finalStatus = statusFromH2Error(
@@ -871,7 +901,9 @@ class NettyClientHandler extends AbstractNettyHandler {
     }
   }
 
-  /** If {@code statusCode} is non-null, it will be used instead of the http2 error code mapping. */
+  /**
+   * If {@code statusCode} is non-null, it will be used instead of the http2 error code mapping.
+   */
   private Status statusFromH2Error(
       Status.Code statusCode, String context, long errorCode, byte[] debugData) {
     Status status = GrpcUtil.Http2Error.statusForCode((int) errorCode);
@@ -898,7 +930,7 @@ class NettyClientHandler extends AbstractNettyHandler {
     int nextStreamId = connection().local().incrementAndGetNextStreamId();
     if (nextStreamId < 0) {
       logger.fine("Stream IDs have been exhausted for this connection. "
-              + "Initiating graceful shutdown of the connection.");
+          + "Initiating graceful shutdown of the connection.");
       throw EXHAUSTED_STREAMS_STATUS.asException();
     }
     return nextStreamId;
@@ -914,6 +946,7 @@ class NettyClientHandler extends AbstractNettyHandler {
   }
 
   private class FrameListener extends Http2FrameAdapter {
+
     private boolean firstSettings = true;
 
     @Override
@@ -984,6 +1017,7 @@ class NettyClientHandler extends AbstractNettyHandler {
 
   private static class PingCountingFrameWriter extends DecoratingHttp2FrameWriter
       implements AbstractNettyHandler.PingLimiter {
+
     private int pingCount;
 
     public PingCountingFrameWriter(Http2FrameWriter delegate) {
