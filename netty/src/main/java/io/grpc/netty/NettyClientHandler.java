@@ -137,19 +137,16 @@ class NettyClientHandler extends AbstractNettyHandler {
 
   public final static Histogram createStreamWriteHeaderDuration = Histogram.build()
       .name("grpc_netty_client_stream_write_header_duration_seconds")
-      .labelNames("path")
       .help("Time taken to write headers for a stream in seconds.")
       .register();
 
   public final static Histogram createStreamAddListenerDuration = Histogram.build()
       .name("grpc_netty_client_stream_add_listener_duration_seconds")
-      .labelNames("path")
       .help("Time taken to add listener for a stream future in seconds.")
       .register();
 
   public final static Histogram createStreamCreateNewFuture = Histogram.build()
       .name("grpc_netty_client_stream_create_future_duration_seconds")
-      .labelNames("path")
       .help("Time taken to create new stream future in seconds.")
       .register();
 
@@ -636,17 +633,15 @@ class NettyClientHandler extends AbstractNettyHandler {
       final ChannelPromise promise) {
     // Create an intermediate promise so that we can intercept the failure reported back to the
     // application.
-    Histogram.Timer createFutureTimer = createStreamCreateNewFuture.labels(headers.path().toString()).startTimer();
+    Histogram.Timer createFutureTimer = createStreamCreateNewFuture.startTimer();
     ChannelPromise tempPromise = ctx().newPromise();
     createFutureTimer.observeDuration();
 
-    Histogram.Timer writeHeaderTimer = createStreamWriteHeaderDuration.labels(
-        headers.path().toString()).startTimer();
+    Histogram.Timer writeHeaderTimer = createStreamWriteHeaderDuration.startTimer();
     ChannelFuture future = encoder().writeHeaders(ctx(), streamId, headers, 0, isGet, tempPromise);
     writeHeaderTimer.observeDuration();
 
-    Histogram.Timer addListenerTimer = createStreamAddListenerDuration.labels(
-        headers.path().toString()).startTimer();
+    Histogram.Timer addListenerTimer = createStreamAddListenerDuration.startTimer();
     future.addListener(new ChannelFutureListener() {
       @Override
       public void operationComplete(ChannelFuture future) throws Exception {
